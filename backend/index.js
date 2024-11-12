@@ -52,7 +52,7 @@ async function fetchMissingDataFromOllama(prompt) {
   }
 
   const data = await response.json();
-  
+
   console.log(data);
 
   if (data && data.response) {
@@ -62,22 +62,67 @@ async function fetchMissingDataFromOllama(prompt) {
   }
 }
 
-
-function extractIntegerFromText(text) {
-  // Find all integer and decimal numbers
-  const matches = text.match(/\d+(\.\d+)?/g);
-
-  if (matches) {
-    // Convert matches to numbers and round to the nearest integer
-    const numbers = matches.map(match => Math.round(parseFloat(match)));
-
-    // Return the last rounded integer
-    return numbers[numbers.length - 1];
+function extractRelevantTextFromResponse(text, columnName, columnType) {
+  // Check for "approximately" and extract the value after it, rounding properly
+  const approxMatch = text.match(/\bapproximately\b[:\s]*([\d\.]+)/i);
+  if (approxMatch) {
+    return Math.round(parseFloat(approxMatch[1])); // Round the value
   }
 
-  return null; // No integer found
+  // Check for "is around" and extract the value after it, rounding properly
+  const aroundMatch = text.match(/\bis around\b[:\s]*([\d\.]+)/i);
+  if (aroundMatch) {
+    return Math.round(parseFloat(aroundMatch[1])); // Round the value
+  }
+
+  // Check for the "≈" symbol and extract the value after it, rounding properly
+  const approxSymbolMatch = text.match(/\b≈\s*([\d\.]+)/i);
+  if (approxSymbolMatch) {
+    return Math.round(parseFloat(approxSymbolMatch[1])); // Round the value
+  }
+
+  // Split the text into sentences to handle each sentence individually
+  const sentences = text.split(/[.!?]/); // Split based on sentence-ending punctuation marks
+
+  // Iterate through each sentence to check for the columnName and its value
+  for (let sentence of sentences) {
+    // Define patterns for "column = value", "column: value", "column is value", and "column ≈ value"
+    const regex = new RegExp(`\\b${columnName}\\b.*?\\s*(=|:|is|≈)\\s*([\\d\\.]+)`, 'i');
+    const match = sentence.match(regex);
+
+    if (match) {
+      const value = match[2]; // Extract the value following "=", ":", "is", or "≈"
+
+      // If column type is 'number', parse the value and round it to the nearest integer
+      if (columnType === 'number') {
+        const parsedValue = parseFloat(value);
+        return !isNaN(parsedValue) ? Math.round(parsedValue) : null; // Round to nearest integer
+      }
+
+      return value; // Return the text value directly for text-type columns
+    }
+  }
+
+  // If no matching value is found in any sentence, return the original text
+  return text;
 }
 
+
+
+
+
+
+// Determine the column type based on the data content in each column
+function getColumnType(data, columnName) {
+  for (const row of data) {
+    if (row[columnName] && !isNaN(row[columnName])) {
+      return 'number';
+    } else if (row[columnName] && typeof row[columnName] === 'string') {
+      return 'text';
+    }
+  }
+  return 'text'; // Default to text if no other match
+}
 
 // Endpoint for file upload and processing
 fastify.post('/upload', async (req, reply) => {
@@ -130,10 +175,11 @@ fastify.post('/upload', async (req, reply) => {
           // Generate prompt for each missing field based on other columns' data
           const promptForMissingData = generatePromptForMissingData(row, key);
           const missingDetails = await fetchMissingDataFromOllama(promptForMissingData);
-          
-          // Update only with integer extracted from GPT response
-          const integerResult = extractIntegerFromText(missingDetails);
-          row[key] = integerResult !== null ? integerResult : "";
+
+          // Determine the column type (number, integer, text) for correct extraction
+          const columnType = getColumnType(dataContent, key);
+          const relevantValue = extractRelevantTextFromResponse(missingDetails, columnType);
+          row[key] = relevantValue !== null ? relevantValue : "";
 
           gptOutputText += `\nRow ${dataContent.indexOf(row) + 1} - ${key}: ${missingDetails}`;
         }
