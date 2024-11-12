@@ -2,58 +2,82 @@ require('dotenv').config();
 
 const Fastify = require('fastify');
 const fastifyMultipart = require('@fastify/multipart');
-const fetch = require('node-fetch'); // Use fetch to call Hugging Face API
+const fetch = require('node-fetch');
 const xlsx = require('xlsx');
 const fs = require('fs');
 const path = require('path');
 const fastifyCors = require('@fastify/cors');
-const fastifyStatic = require('@fastify/static'); // Import fastify-static
+const fastifyStatic = require('@fastify/static');
 
 const fastify = Fastify({ logger: true });
 fastify.register(fastifyMultipart);
 fastify.register(fastifyCors, {
-  origin: 'http://localhost:3000', // Replace with your frontend origin
+  origin: 'http://localhost:3000',
 });
 
 // Register fastify-static to serve files from a directory
-const UPLOAD_DIR = path.join(__dirname, 'uploads'); // Directory for uploaded files
-fs.mkdirSync(UPLOAD_DIR, { recursive: true }); // Ensure the directory exists
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fastify.register(fastifyStatic, {
   root: UPLOAD_DIR,
-  prefix: '/uploads/', // Serve files from this prefix
+  prefix: '/uploads/',
 });
 
-// Function to generate prompt for missing data
-function generatePromptForMissingData(prompt, availableData) {
-  const details = Object.entries(availableData)
-    .map(([key, value]) => `${key}: ${value}`)
+// Function to generate prompt for missing data based on specific column values
+function generatePromptForMissingData(row, missingColumn) {
+  const conditions = Object.entries(row)
+    .filter(([_, value]) => value !== null && value !== "")
+    .map(([key, value]) => `${key} = ${value}`)
     .join(', ');
-  return `${prompt}\nBased on the following details, fill in the missing fields:\n${details}.`;
+
+  return `If ${conditions}, then tell me what will be the value for ${missingColumn}?. Tell me the real-world value.`;
 }
 
-// Function to call Hugging Face API for missing data completion
-async function fetchMissingDataFromHuggingFace(prompt, availableData) {
-  const fullPrompt = generatePromptForMissingData(prompt, availableData);
-
-  // Make a POST request to Hugging Face Inference API
-  const response = await fetch("https://api-inference.huggingface.co/models/gpt2", {
-    method: "POST",
+// Function to fetch missing data using Ollama (via HTTP API)
+async function fetchMissingDataFromOllama(prompt) {
+  const response = await fetch('http://localhost:11434/api/generate', {
+    method: 'POST',
     headers: {
-      Authorization: `Bearer ${process.env.HUGGING_FACE_API_KEY}`,
-      "Content-Type": "application/json"
+      'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ inputs: fullPrompt })
+    body: JSON.stringify({
+      model: 'llama3.2',
+      prompt: prompt,
+      stream: false,
+    }),
   });
 
-  const result = await response.json();
-  
-  // Handle potential errors from Hugging Face API response
-  if (result.error) {
-    throw new Error(`Hugging Face API error: ${result.error}`);
+  if (!response.ok) {
+    throw new Error('Failed to fetch data from Ollama API');
   }
 
-  return result[0]?.generated_text.trim() || "No response generated.";
+  const data = await response.json();
+  
+  console.log(data);
+
+  if (data && data.response) {
+    return data.response.trim();
+  } else {
+    throw new Error('Invalid response format from Ollama API');
+  }
 }
+
+
+function extractIntegerFromText(text) {
+  // Find all integer and decimal numbers
+  const matches = text.match(/\d+(\.\d+)?/g);
+
+  if (matches) {
+    // Convert matches to numbers and round to the nearest integer
+    const numbers = matches.map(match => Math.round(parseFloat(match)));
+
+    // Return the last rounded integer
+    return numbers[numbers.length - 1];
+  }
+
+  return null; // No integer found
+}
+
 
 // Endpoint for file upload and processing
 fastify.post('/upload', async (req, reply) => {
@@ -64,9 +88,9 @@ fastify.post('/upload', async (req, reply) => {
 
     for await (const part of parts) {
       if (part.file) {
-        file = part; // This is the uploaded file stream
+        file = part;
       } else if (part.fieldname === 'prompt') {
-        prompt = part.value; // Get the prompt value
+        prompt = part.value;
       }
     }
 
@@ -89,7 +113,7 @@ fastify.post('/upload', async (req, reply) => {
     for await (const chunk of file.file) {
       buffer.push(chunk);
     }
-    buffer = Buffer.concat(buffer); // Convert chunks to a single buffer
+    buffer = Buffer.concat(buffer);
 
     let dataContent;
     if (fileExtension === '.xlsx' || fileExtension === '.csv') {
@@ -101,33 +125,33 @@ fastify.post('/upload', async (req, reply) => {
 
     let gptOutputText = '';
     for (let row of dataContent) {
-      const availableData = Object.fromEntries(
-        Object.entries(row).filter(([_, value]) => value !== null && value !== "")
-      );
+      for (let key in row) {
+        if (!row[key]) {
+          // Generate prompt for each missing field based on other columns' data
+          const promptForMissingData = generatePromptForMissingData(row, key);
+          const missingDetails = await fetchMissingDataFromOllama(promptForMissingData);
+          
+          // Update only with integer extracted from GPT response
+          const integerResult = extractIntegerFromText(missingDetails);
+          row[key] = integerResult !== null ? integerResult : "";
 
-      if (Object.values(row).includes(null) || Object.values(row).includes("")) {
-        const missingDetails = await fetchMissingDataFromHuggingFace(prompt, availableData);
-        gptOutputText += `\nRow ${dataContent.indexOf(row) + 1}: ${missingDetails}`;
-
-        for (let key in row) {
-          if (!row[key]) {
-            row[key] = missingDetails;
-          }
+          gptOutputText += `\nRow ${dataContent.indexOf(row) + 1} - ${key}: ${missingDetails}`;
         }
       }
     }
 
-    // Create and save the updated file in the uploads directory
-    const outputFilePath = path.join(UPLOAD_DIR, 'updated_file.xlsx'); // Save to uploads directory
+    // Save the updated file
+    const outputFilePath = path.join(UPLOAD_DIR, 'updated_file.xlsx');
     const newWorksheet = xlsx.utils.json_to_sheet(dataContent);
     const newWorkbook = xlsx.utils.book_new();
     xlsx.utils.book_append_sheet(newWorkbook, newWorksheet, 'Updated Data');
     xlsx.writeFile(newWorkbook, outputFilePath);
+    const backendData = dataContent.length > 0 ? dataContent.map(row => Object.values(row)) : [[]];
 
     reply.send({
-      filePath: `http://localhost:5000/uploads/updated_file.xlsx`, // Full URL path
-      backendData: dataContent,
-      gptOutputText: gptOutputText.trim()
+      filePath: `http://localhost:5000/uploads/updated_file.xlsx`,
+      backendData: backendData,
+      gptOutputText: gptOutputText.trim() 
     });
     
   } catch (error) {

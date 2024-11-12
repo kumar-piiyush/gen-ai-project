@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 import * as XLSX from 'xlsx';
-import ReactMarkdown from 'react-markdown';
 import './App.css';
 
 function App() {
@@ -11,7 +10,6 @@ function App() {
   const [backendPreviewData, setBackendPreviewData] = useState([]);
   const [backendTextOutput, setBackendTextOutput] = useState('');
   const [downloadLink, setDownloadLink] = useState(null);
-  const [loading, setLoading] = useState(false); // New loading state
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
@@ -24,7 +22,7 @@ function App() {
       const workbook = XLSX.read(data, { type: 'array' });
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
-      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: true }); // Preserve blank rows
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
       setPreviewData(jsonData);
     };
     reader.readAsArrayBuffer(selectedFile);
@@ -36,7 +34,6 @@ function App() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setLoading(true); // Start loading
     const formData = new FormData();
     formData.append('file', file);
     formData.append('prompt', prompt);
@@ -49,24 +46,33 @@ function App() {
       const { filePath, backendData, gptOutputText } = response.data || {};
 
       if (filePath) {
+        // Download the file programmatically and store it in updated_files folder
         const downloadedFile = await axios.get(filePath, { responseType: 'blob' });
         const updatedFile = new File([downloadedFile.data], 'updated_file.xlsx', {
           type: downloadedFile.data.type,
         });
 
+        // Set download link to trigger download (optional)
         setDownloadLink(URL.createObjectURL(updatedFile));
+
+        // Preview the updated file in Backend Data Preview
         previewUpdatedFile(updatedFile);
       }
 
-      setBackendPreviewData(backendData);
+      if (Array.isArray(backendData) && backendData.length > 0 && Array.isArray(backendData[0])) {
+        setBackendPreviewData(backendData);
+      } else {
+        console.error('Expected backendData to be a non-empty array of arrays', backendData);
+        setBackendPreviewData([]);
+      }
+
       setBackendTextOutput(gptOutputText || '');
     } catch (error) {
       console.error('Error uploading file:', error);
-    } finally {
-      setLoading(false); // Stop loading
     }
   };
 
+  // Function to preview the updated file in the backend preview section
   const previewUpdatedFile = (file) => {
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -74,7 +80,7 @@ function App() {
       const workbook = XLSX.read(data, { type: 'array' });
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
-      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: true });
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
       setBackendPreviewData(jsonData);
     };
     reader.readAsArrayBuffer(file);
@@ -82,15 +88,6 @@ function App() {
 
   return (
     <div className="container">
-      {loading && (
-        <div className="loading-overlay">
-          <div className="loading-message">
-            <span>Loading updated file and response from the backend model...</span>
-            <div className="spinner"></div>
-          </div>
-        </div>
-      )}
-
       <div className="left-pane">
         <h1>Data Completion Tool</h1>
         <form onSubmit={handleSubmit}>
@@ -101,7 +98,7 @@ function App() {
           <textarea
             value={prompt}
             onChange={handlePromptChange}
-            placeholder="Provide a prompt"
+            placeholder="Provide a prompt to guide Llama in filling the missing data"
           />
 
           <button type="submit">Upload and Process</button>
@@ -131,7 +128,7 @@ function App() {
                   {previewData.slice(1).map((row, rowIndex) => (
                     <tr key={rowIndex}>
                       {row.map((cell, cellIndex) => (
-                        <td key={cellIndex}>{cell !== undefined ? cell : ''}</td>
+                        <td key={cellIndex}>{cell}</td>
                       ))}
                     </tr>
                   ))}
@@ -145,7 +142,7 @@ function App() {
 
         <div className="preview-container">
           <h2 className="preview-header">Backend Data Preview</h2>
-          {Array.isArray(backendPreviewData) && backendPreviewData.length > 0 && Array.isArray(backendPreviewData[0]) ? (
+          {backendPreviewData.length > 0 ? (
             <div className="backend-table-container">
               <table className="backend-table">
                 <thead>
@@ -159,7 +156,7 @@ function App() {
                   {backendPreviewData.slice(1).map((row, rowIndex) => (
                     <tr key={rowIndex}>
                       {row.map((cell, cellIndex) => (
-                        <td key={cellIndex}>{cell !== undefined ? cell : ''}</td>
+                        <td key={cellIndex}>{cell}</td>
                       ))}
                     </tr>
                   ))}
@@ -173,7 +170,7 @@ function App() {
 
         <div className="preview-container">
           <h2 className="preview-header">GPT Text Output</h2>
-          <ReactMarkdown>{backendTextOutput}</ReactMarkdown>
+          <p>{backendTextOutput}</p>
         </div>
       </div>
     </div>
