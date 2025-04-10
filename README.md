@@ -83,7 +83,7 @@ npm install express nodemon axios dotenv
 5. Download the processed file with the imputed data.
 
 ## Snapshot
-![Alt text](images/frontend-snapsort.png)
+![Alt text](images/frontend-snapsort-1.png)
 
 ## Contributing
 1. Fork the repository.
